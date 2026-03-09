@@ -64,6 +64,8 @@ def ask(
     from history_rag.retrieval.retriever import Retriever
     from history_rag.generation.llm import LLM
     from history_rag.generation.prompts import get_system_prompt, format_user_prompt
+    from history_rag.generation.query_rewriter import rewrite_query
+    from history_rag.generation.relevance_filter import filter_relevant
 
     if top_k is None:
         top_k = settings.retrieval_top_k
@@ -80,23 +82,48 @@ def ask(
         console.print("[red]数据库为空，请先运行: python -m history_rag ingest[/red]")
         raise typer.Exit(1)
 
-    retriever = Retriever(store)
+    # Build BM25 index for hybrid search
+    bm25_index = None
+    try:
+        from history_rag.retrieval.bm25_index import BM25Index
+        bm25_index = BM25Index(store.collection)
+    except Exception as e:
+        console.print(f"[yellow]BM25 索引构建失败，退化为纯向量检索: {e}[/yellow]")
+
+    retriever = Retriever(store, bm25_index=bm25_index)
     llm = LLM(settings.anthropic_api_key, settings.llm_model)
 
-    # Retrieve
+    # Step 1: Query Rewriting
+    console.print(f"[cyan]改写查询中...[/cyan]")
+    queries = rewrite_query(llm, query)
+
+    # Step 2: Multi-query Retrieval
     console.print(f"[cyan]检索中 (top_k={top_k})...[/cyan]")
-    results, context = retriever.retrieve(query, top_k=top_k, source_filter=source)
+    results, _ = retriever.retrieve(queries, top_k=top_k, source_filter=source)
 
     if not results:
         console.print("[yellow]未找到相关内容[/yellow]")
         raise typer.Exit(0)
 
+    # Step 3: Relevance Filtering
+    console.print(f"[cyan]过滤相关性...[/cyan]")
+    results = filter_relevant(llm, query, results)
+
     # Show sources
-    console.print(f"\n[dim]找到 {len(results)} 条相关记录：[/dim]")
+    console.print(f"\n[dim]筛选后 {len(results)} 条相关记录：[/dim]")
     for r in results:
         console.print(f"  [dim]- {r['metadata']['citation']}（{r['metadata']['chapter']}）[/dim]")
 
-    # Generate
+    # Build context from filtered results
+    context_parts = []
+    for i, r in enumerate(results, 1):
+        citation = r["metadata"]["citation"]
+        chapter = r["metadata"]["chapter"]
+        text = r["text"]
+        context_parts.append(f"[{i}] {citation}（{chapter}）:\n{text}")
+    context = "\n\n".join(context_parts)
+
+    # Step 4: Generate
     console.print(f"\n[cyan]生成回答 (style={style})...[/cyan]\n")
     system_prompt = get_system_prompt(style)
     user_prompt = format_user_prompt(context, query)

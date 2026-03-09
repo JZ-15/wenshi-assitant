@@ -1,3 +1,5 @@
+from collections.abc import Generator
+
 import anthropic
 
 
@@ -19,3 +21,19 @@ class LLM:
             messages=[{"role": "user", "content": user}],
         )
         return response.content[0].text
+
+    def stream(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 4096,
+    ) -> Generator[str, None, None]:
+        """Yield text tokens as they are generated."""
+        with self.client.messages.stream(
+            model=self.model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        ) as stream:
+            for text in stream.text_stream:
+                yield text

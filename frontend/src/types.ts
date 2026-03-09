@@ -9,6 +9,7 @@ export interface SourceInfo {
   chapter: string
   text: string
   distance: number
+  highlights?: string[]
 }
 
 export interface AskResponse {

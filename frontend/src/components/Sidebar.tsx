@@ -7,9 +7,11 @@ interface SidebarProps {
   selectedStyle: string
   selectedSource: string | null
   topK: number
+  translate: boolean
   onStyleChange: (style: string) => void
   onSourceChange: (source: string | null) => void
   onTopKChange: (topK: number) => void
+  onTranslateChange: (translate: boolean) => void
 }
 
 export function Sidebar({
@@ -18,9 +20,11 @@ export function Sidebar({
   selectedStyle,
   selectedSource,
   topK,
+  translate,
   onStyleChange,
   onSourceChange,
   onTopKChange,
+  onTranslateChange,
 }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false)
 
@@ -103,6 +107,26 @@ export function Sidebar({
           <span>精确</span>
           <span>广泛</span>
         </div>
+      </div>
+
+      {/* Translate toggle */}
+      <div>
+        <label className="flex items-center justify-between cursor-pointer">
+          <span className="text-sm text-gray-400">引文附白话翻译</span>
+          <button
+            onClick={() => onTranslateChange(!translate)}
+            className={`relative w-10 h-5 rounded-full transition-colors ${
+              translate ? 'bg-amber-600' : 'bg-[#333]'
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${
+                translate ? 'translate-x-5' : ''
+              }`}
+            />
+          </button>
+        </label>
+        <p className="text-xs text-gray-600 mt-1">开启后引用原文会附括号白话翻译</p>
       </div>
     </div>
   )
