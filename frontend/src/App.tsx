@@ -4,9 +4,14 @@ import { Sidebar } from './components/Sidebar'
 import { ChatMessage } from './components/ChatMessage'
 import { ChatInput } from './components/ChatInput'
 import { SourcePanel } from './components/SourcePanel'
-import { askQuestionStream, getStyles, getSources } from './api'
+import { askQuestionStream, getModels, getStyles, getSources } from './api'
 import type { ChatHistoryMessage } from './api'
-import type { Message, StyleOption, SourceInfo } from './types'
+import type { Message, ModelOption, StyleOption, SourceInfo } from './types'
+
+const DEFAULT_MODELS: ModelOption[] = [
+  { id: 'claude-sonnet-4-20250514', name: 'Sonnet 4', description: '快速，性价比高' },
+  { id: 'claude-opus-4-20250514', name: 'Opus 4', description: '最强，适合深度分析' },
+]
 
 const DEFAULT_STYLES: StyleOption[] = [
   { id: 'default', name: '默认', description: '清晰准确，有条理' },
@@ -29,8 +34,10 @@ const MAX_HISTORY = 6
 function App() {
   const [messages, setMessages] = useState<Message[]>([])
   const [loadingState, setLoadingState] = useState<LoadingState>(null)
+  const [models, setModels] = useState<ModelOption[]>(DEFAULT_MODELS)
   const [styles, setStyles] = useState<StyleOption[]>(DEFAULT_STYLES)
   const [sources, setSources] = useState<string[]>(DEFAULT_SOURCES)
+  const [selectedModel, setSelectedModel] = useState('claude-sonnet-4-20250514')
   const [selectedStyle, setSelectedStyle] = useState('default')
   const [selectedSource, setSelectedSource] = useState<string | null>(null)
   const [topK, setTopK] = useState(10)
@@ -42,6 +49,7 @@ function App() {
   const chatScrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
+    getModels().then(setModels).catch(() => {})
     getStyles().then(setStyles).catch(() => {})
     getSources().then(setSources).catch(() => {})
   }, [])
@@ -58,9 +66,6 @@ function App() {
       .slice(-MAX_HISTORY)
       .map((m) => ({ role: m.role, content: m.content }))
 
-    // Index of the assistant message we'll be streaming into
-    let assistantIdx = -1
-
     try {
       await askQuestionStream(
         query,
@@ -74,7 +79,6 @@ function App() {
             // Create assistant message placeholder and set panel sources
             setPanelSources(sourcesData)
             setMessages((prev) => {
-              assistantIdx = prev.length
               return [...prev, { role: 'assistant', content: '', sources: sourcesData }]
             })
             setLoadingState('generating')
@@ -123,6 +127,7 @@ function App() {
             setLoadingState(null)
           },
         },
+        selectedModel,
       )
     } catch {
       setMessages((prev) => [
@@ -181,7 +186,7 @@ function App() {
 
         if (msg.sources && msg.sources.length > 0) {
           messagesHtml += `<div style="margin-top:10px;padding-top:8px;border-top:1px solid #eee;font-size:12px;color:#888;">`
-          msg.sources.forEach((s, i) => {
+          msg.sources.forEach((s, _i) => {
             globalIndex++
             allSources.push({ index: globalIndex, source: s })
             messagesHtml += `<div>参考 <strong style="color:#b45309;">[${globalIndex}]</strong> ${s.citation}（${s.chapter}）</div>`
@@ -266,12 +271,15 @@ function App() {
     <div className="h-screen flex bg-[#0f0f0f]">
       {/* Sidebar */}
       <Sidebar
+        models={models}
         styles={styles}
         sources={sources}
+        selectedModel={selectedModel}
         selectedStyle={selectedStyle}
         selectedSource={selectedSource}
         topK={topK}
         translate={translate}
+        onModelChange={setSelectedModel}
         onStyleChange={setSelectedStyle}
         onSourceChange={setSelectedSource}
         onTopKChange={setTopK}

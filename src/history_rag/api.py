@@ -39,6 +39,7 @@ def _init():
     _components["retriever"] = Retriever(store, bm25_index=bm25_index)
 
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _init()
@@ -64,6 +65,7 @@ class AskRequest(BaseModel):
     top_k: int = 10
     history: list[dict] = []
     translate: bool = False
+    model: str | None = None
 
 
 class SourceInfo(BaseModel):
@@ -84,6 +86,11 @@ class StatsResponse(BaseModel):
     available_sources: list[str]
 
 
+AVAILABLE_MODELS = [
+    {"id": "claude-sonnet-4-20250514", "name": "Sonnet 4", "description": "快速，性价比高"},
+    {"id": "claude-opus-4-20250514", "name": "Opus 4", "description": "最强，适合深度分析"},
+]
+
 AVAILABLE_STYLES = [
     {"id": "default", "name": "默认", "description": "清晰准确，有条理"},
     {"id": "academic", "name": "学术", "description": "严谨考据，大量引用"},
@@ -98,27 +105,55 @@ ALL_SOURCES = [
 ]
 
 
-def _resolve_query(llm, query: str, history: list[dict]) -> str:
-    """Apply context rewriting if history is present."""
-    if history:
-        from history_rag.generation.context_rewriter import rewrite_with_context
-        return rewrite_with_context(llm, history, query)
-    return query
+def _get_gen_llm(model: str | None):
+    """Return a LLM instance for answer generation based on user's model choice."""
+    from history_rag.generation.llm import LLM
+    chosen = model or settings.llm_model
+    # Reuse the default LLM if model matches, otherwise create a new one
+    default_llm = _components["llm"]
+    if chosen == default_llm.model:
+        return default_llm
+    # Cache per model to avoid re-creating on every request
+    cache_key = f"llm:{chosen}"
+    if cache_key not in _components:
+        _components[cache_key] = LLM(settings.anthropic_api_key, chosen)
+    return _components[cache_key]
 
 
-def _retrieve_and_filter(llm, retriever, query: str, original_query: str, req: AskRequest):
-    """Run query rewriting → retrieval → relevance filtering. Returns (results, context)."""
-    from history_rag.generation.query_rewriter import rewrite_query
-    from history_rag.generation.relevance_filter import filter_relevant
+def _sandwich_reorder(results: list[dict]) -> list[dict]:
+    """Reorder results in a sandwich pattern for lost-in-the-middle mitigation.
 
-    queries = rewrite_query(llm, query)
+    Places the most relevant results at the beginning and end of the list,
+    where LLM attention is highest, and less relevant ones in the middle.
+    """
+    if len(results) <= 2:
+        return results
+    front = results[::2]   # odd positions: 0, 2, 4, ...
+    back = results[1::2]   # even positions: 1, 3, 5, ...
+    return front + list(reversed(back))
+
+
+def _retrieve_and_filter(llm, retriever, req: AskRequest):
+    """Run combined context+query rewriting → retrieval → relevance filtering.
+
+    Combines context rewriting and query expansion into a single LLM call
+    when conversation history is present, saving one round-trip.
+    """
+    from history_rag.generation.query_rewriter import rewrite_query_with_context
+
+    queries = rewrite_query_with_context(llm, req.history, req.query)
     source_filter = req.source if req.source and req.source != "全部" else None
     results, _ = retriever.retrieve(queries, top_k=req.top_k, source_filter=source_filter)
 
     if not results:
         return [], ""
 
-    results = filter_relevant(llm, original_query, results)
+    # LLM-based relevance filtering
+    from history_rag.generation.relevance_filter import filter_relevant
+    results = filter_relevant(llm, req.query, results)
+
+    # Sandwich reorder: most relevant at start and end, less relevant in middle
+    results = _sandwich_reorder(results)
 
     context_parts = []
     for i, r in enumerate(results, 1):
@@ -154,21 +189,19 @@ def ask(req: AskRequest):
 
     retriever = _components["retriever"]
     llm = _components["llm"]
+    llm_gen = _get_gen_llm(req.model)
 
-    # Context rewriting for multi-turn
-    resolved_query = _resolve_query(llm, req.query, req.history)
-
-    # Retrieval + filtering
-    results, context = _retrieve_and_filter(llm, retriever, resolved_query, req.query, req)
+    # Combined context rewriting + query expansion + retrieval + filtering (Sonnet)
+    results, context = _retrieve_and_filter(llm, retriever, req)
     if not results:
         return AskResponse(answer="未找到相关内容，请尝试换个问法。", sources=[])
 
-    # Generate answer
+    # Generate answer (user-selected model)
     system_prompt = get_system_prompt(req.style)
     user_prompt = format_user_prompt(context, req.query, translate=req.translate)
-    answer = llm.generate(system_prompt, user_prompt)
+    answer = llm_gen.generate(system_prompt, user_prompt)
 
-    # Compute highlights
+    # Compute highlights (Sonnet)
     all_highlights = compute_highlights(llm, answer, results)
 
     return AskResponse(answer=answer, sources=_build_sources(results, all_highlights))
@@ -189,13 +222,11 @@ def ask_stream(req: AskRequest):
 
     retriever = _components["retriever"]
     llm = _components["llm"]
+    llm_gen = _get_gen_llm(req.model)
 
     def generate_events():
-        # Context rewriting for multi-turn
-        resolved_query = _resolve_query(llm, req.query, req.history)
-
-        # Retrieval + filtering
-        results, context = _retrieve_and_filter(llm, retriever, resolved_query, req.query, req)
+        # Combined context rewriting + query expansion + retrieval + filtering (Sonnet)
+        results, context = _retrieve_and_filter(llm, retriever, req)
 
         if not results:
             sources_json = json.dumps([], ensure_ascii=False)
@@ -208,16 +239,16 @@ def ask_stream(req: AskRequest):
         sources_data = [s.model_dump() for s in _build_sources(results)]
         yield f"event: sources\ndata: {json.dumps(sources_data, ensure_ascii=False)}\n\n"
 
-        # Stream answer tokens
+        # Stream answer tokens (user-selected model)
         system_prompt = get_system_prompt(req.style)
         user_prompt = format_user_prompt(context, req.query, translate=req.translate)
 
         full_answer = []
-        for token in llm.stream(system_prompt, user_prompt):
+        for token in llm_gen.stream(system_prompt, user_prompt):
             full_answer.append(token)
             yield f"event: token\ndata: {json.dumps(token, ensure_ascii=False)}\n\n"
 
-        # Compute highlights after answer is complete
+        # Compute highlights after answer is complete (Sonnet)
         answer_text = "".join(full_answer)
         try:
             all_highlights = compute_highlights(llm, answer_text, results)
@@ -240,6 +271,11 @@ def ask_stream(req: AskRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/api/models")
+def get_models():
+    return AVAILABLE_MODELS
 
 
 @app.get("/api/styles")

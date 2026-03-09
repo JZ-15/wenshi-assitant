@@ -65,7 +65,6 @@ def ask(
     from history_rag.generation.llm import LLM
     from history_rag.generation.prompts import get_system_prompt, format_user_prompt
     from history_rag.generation.query_rewriter import rewrite_query
-    from history_rag.generation.relevance_filter import filter_relevant
 
     if top_k is None:
         top_k = settings.retrieval_top_k
@@ -105,8 +104,9 @@ def ask(
         console.print("[yellow]未找到相关内容[/yellow]")
         raise typer.Exit(0)
 
-    # Step 3: Relevance Filtering
-    console.print(f"[cyan]过滤相关性...[/cyan]")
+    # Step 3: LLM-based relevance filtering
+    console.print(f"[cyan]筛选相关性...[/cyan]")
+    from history_rag.generation.relevance_filter import filter_relevant
     results = filter_relevant(llm, query, results)
 
     # Show sources

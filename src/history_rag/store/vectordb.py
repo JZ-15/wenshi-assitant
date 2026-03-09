@@ -27,8 +27,14 @@ class VectorStore:
         if not docs:
             return
 
-        # 断点续传：查出已入库的 chunk_id，跳过它们
-        existing_ids = set(self.collection.get()["ids"]) if self.count > 0 else set()
+        # 断点续传：分批查出已入库的 chunk_id，跳过它们
+        existing_ids: set[str] = set()
+        total = self.count
+        if total > 0:
+            fetch_batch = 5000
+            for offset in range(0, total, fetch_batch):
+                batch = self.collection.get(limit=fetch_batch, offset=offset)
+                existing_ids.update(batch["ids"])
         remaining = [d for d in docs if d.chunk_id not in existing_ids]
 
         if not remaining:

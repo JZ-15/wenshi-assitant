@@ -1,13 +1,16 @@
 import { useState } from 'react'
-import type { StyleOption } from '../types'
+import type { ModelOption, StyleOption } from '../types'
 
 interface SidebarProps {
+  models: ModelOption[]
   styles: StyleOption[]
   sources: string[]
+  selectedModel: string
   selectedStyle: string
   selectedSource: string | null
   topK: number
   translate: boolean
+  onModelChange: (model: string) => void
   onStyleChange: (style: string) => void
   onSourceChange: (source: string | null) => void
   onTopKChange: (topK: number) => void
@@ -15,12 +18,15 @@ interface SidebarProps {
 }
 
 export function Sidebar({
+  models,
   styles,
   sources,
+  selectedModel,
   selectedStyle,
   selectedSource,
   topK,
   translate,
+  onModelChange,
   onStyleChange,
   onSourceChange,
   onTopKChange,
@@ -52,6 +58,27 @@ export function Sidebar({
         >
           ✕
         </button>
+      </div>
+
+      {/* Model selection */}
+      <div>
+        <label className="block text-sm text-gray-400 mb-2">模型</label>
+        <div className="flex flex-col gap-1.5">
+          {models.map((m) => (
+            <button
+              key={m.id}
+              onClick={() => onModelChange(m.id)}
+              className={`text-left px-3 py-2 rounded-lg text-sm transition-colors ${
+                selectedModel === m.id
+                  ? 'bg-amber-900/40 text-amber-200 border border-amber-700/50'
+                  : 'hover:bg-[#252525] text-gray-300'
+              }`}
+            >
+              <div className="font-medium">{m.name}</div>
+              <div className="text-xs text-gray-500 mt-0.5">{m.description}</div>
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Style selection */}

@@ -1,3 +1,9 @@
+export interface ModelOption {
+  id: string
+  name: string
+  description: string
+}
+
 export interface StyleOption {
   id: string
   name: string

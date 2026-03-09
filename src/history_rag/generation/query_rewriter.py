@@ -28,6 +28,34 @@ REWRITE_PROMPT = """你是一个中国古代史料检索专家。用户会提出
 问题：{query}"""
 
 
+REWRITE_WITH_CONTEXT_PROMPT = """你是一个中国古代史料检索专家。根据对话历史和用户的追问，生成1-3个适合在古文向量数据库中检索的查询。
+
+对话历史：
+{history_block}
+
+用户追问：{query}
+
+改写要求：
+1. 先将追问中的代词（他、她、此人等）替换为对话中提到的具体人名/事物
+2. 提取关键的人名、事件、朝代、官职等实体
+3. 用简洁的短语而非完整句子，更接近古文表述
+4. 从不同角度覆盖问题的各个方面
+
+请只返回JSON数组，不要其他内容。"""
+
+
+def _parse_query_list(result: str, fallback: str) -> list[str]:
+    """Parse a JSON array of query strings from LLM output."""
+    text = result.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    queries = json.loads(text)
+    if isinstance(queries, list) and all(isinstance(q, str) for q in queries):
+        console.print(f"[dim]查询改写: {queries}[/dim]")
+        return queries
+    return [fallback]
+
+
 def rewrite_query(llm: LLM, query: str) -> list[str]:
     """Rewrite user query into 1-3 search queries optimized for classical Chinese retrieval."""
     try:
@@ -36,16 +64,46 @@ def rewrite_query(llm: LLM, query: str) -> list[str]:
             user=REWRITE_PROMPT.format(query=query),
             max_tokens=256,
         )
-        # Parse JSON from response
-        text = result.strip()
-        # Handle markdown code blocks
-        if text.startswith("```"):
-            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        queries = json.loads(text)
-        if isinstance(queries, list) and all(isinstance(q, str) for q in queries):
-            console.print(f"[dim]查询改写: {queries}[/dim]")
-            return queries
+        return _parse_query_list(result, query)
     except (json.JSONDecodeError, Exception) as e:
         console.print(f"[yellow]查询改写失败({e})，使用原始查询[/yellow]")
+
+    return [query]
+
+
+def rewrite_query_with_context(
+    llm: LLM, history: list[dict], query: str
+) -> list[str]:
+    """Combined context rewriting + query expansion in a single LLM call.
+
+    When history is empty, behaves like rewrite_query().
+    When history is present, resolves pronouns AND generates search queries
+    in one call (saves one LLM round-trip vs separate context_rewriter + query_rewriter).
+    """
+    if not history:
+        return rewrite_query(llm, query)
+
+    # Build history block (last 3 turns)
+    recent = history[-6:]
+    lines = []
+    for msg in recent:
+        role = "用户" if msg["role"] == "user" else "助手"
+        content = msg["content"]
+        if msg["role"] == "assistant" and len(content) > 300:
+            content = content[:300] + "..."
+        lines.append(f"{role}：{content}")
+    history_block = "\n".join(lines)
+
+    try:
+        result = llm.generate(
+            system="你是检索查询改写助手，只返回JSON数组。",
+            user=REWRITE_WITH_CONTEXT_PROMPT.format(
+                history_block=history_block, query=query
+            ),
+            max_tokens=256,
+        )
+        return _parse_query_list(result, query)
+    except (json.JSONDecodeError, Exception) as e:
+        console.print(f"[yellow]上下文查询改写失败({e})，使用原始查询[/yellow]")
 
     return [query]

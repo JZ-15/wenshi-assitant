@@ -1,4 +1,4 @@
-import type { AskResponse, StyleOption, SourceInfo } from './types'
+import type { AskResponse, ModelOption, StyleOption, SourceInfo } from './types'
 
 const BASE = '/api'
 
@@ -14,6 +14,7 @@ export async function askQuestion(
   topK: number,
   history: ChatHistoryMessage[] = [],
   translate: boolean = false,
+  model: string | null = null,
 ): Promise<AskResponse> {
   const res = await fetch(`${BASE}/ask`, {
     method: 'POST',
@@ -25,6 +26,7 @@ export async function askQuestion(
       top_k: topK,
       history,
       translate,
+      model: model || undefined,
     }),
   })
   if (!res.ok) throw new Error(`API error: ${res.status}`)
@@ -47,6 +49,7 @@ export async function askQuestionStream(
   history: ChatHistoryMessage[],
   translate: boolean,
   callbacks: StreamCallbacks,
+  model: string | null = null,
 ): Promise<void> {
   const res = await fetch(`${BASE}/ask/stream`, {
     method: 'POST',
@@ -58,6 +61,7 @@ export async function askQuestionStream(
       top_k: topK,
       history,
       translate,
+      model: model || undefined,
     }),
   })
 
@@ -124,6 +128,11 @@ export async function askQuestionStream(
       }
     }
   }
+}
+
+export async function getModels(): Promise<ModelOption[]> {
+  const res = await fetch(`${BASE}/models`)
+  return res.json()
 }
 
 export async function getStyles(): Promise<StyleOption[]> {

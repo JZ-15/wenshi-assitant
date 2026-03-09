@@ -1,20 +1,28 @@
 import logging
 import re
 
+import jieba
 from rank_bm25 import BM25Okapi
 
 logger = logging.getLogger(__name__)
 
+PUNCTUATION = set('，。！？；：、""''（）《》·')
+
 
 def _tokenize(text: str) -> list[str]:
-    """Simple tokenizer for classical Chinese: character-level + punctuation split.
+    """Tokenizer for classical Chinese: jieba word segmentation + character-level.
 
-    Classical Chinese has no spaces, so character-level tokenization is a
-    reasonable baseline. Punctuation is removed.
+    Combines word-level tokens (to capture multi-char terms like 贞观之治)
+    with character-level tokens (since classical Chinese often uses single
+    characters as words).
     """
-    # Remove punctuation and whitespace
-    text = re.sub(r'[，。！？；：、""''（）《》\s\n\r\t]', '', text)
-    return list(text)
+    # Clean whitespace
+    text = re.sub(r'[\s\n\r\t]+', '', text)
+    # Word-level segmentation via jieba
+    words = [w for w in jieba.cut(text) if w not in PUNCTUATION and w.strip()]
+    # Character-level tokens as supplement
+    chars = [c for c in text if c not in PUNCTUATION]
+    return words + chars
 
 
 class BM25Index:
@@ -50,8 +58,12 @@ class BM25Index:
             self._index = None
             return
 
-        # Tokenize all documents
-        tokenized = [_tokenize(doc) for doc in self._documents]
+        # Tokenize documents with source metadata prefix for better keyword matching
+        # e.g. searching "三国志" or "武帝纪" will now hit relevant chunks
+        tokenized = []
+        for doc, meta in zip(self._documents, self._metadatas):
+            prefix = f"{meta.get('citation', '')} {meta.get('chapter', '')} "
+            tokenized.append(_tokenize(prefix + doc))
         self._index = BM25Okapi(tokenized)
         logger.info("BM25 index built with %d documents", len(self._ids))
 
