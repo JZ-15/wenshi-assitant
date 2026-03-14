@@ -110,7 +110,7 @@ export function Sidebar({
           onChange={(e) => onSourceChange(e.target.value || null)}
           className="w-full bg-[#252525] border border-[#333] rounded-lg px-3 py-2 text-sm text-gray-300 focus:outline-none focus:border-amber-700"
         >
-          <option value="">全部（二十四史）</option>
+          <option value="">全部</option>
           {sources.map((s) => (
             <option key={s} value={s}>{s}</option>
           ))}
