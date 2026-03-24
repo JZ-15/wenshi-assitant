@@ -98,7 +98,7 @@ def ask(
 
     # Step 2: Multi-query Retrieval
     console.print(f"[cyan]检索中 (top_k={top_k})...[/cyan]")
-    results, _ = retriever.retrieve(queries, top_k=top_k, source_filter=source)
+    results, _ = retriever.retrieve(queries, top_k=top_k, source_filter=[source] if source else None)
 
     if not results:
         console.print("[yellow]未找到相关内容[/yellow]")

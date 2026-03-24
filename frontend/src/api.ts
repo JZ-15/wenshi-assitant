@@ -1,4 +1,4 @@
-import type { AskResponse, ModelOption, StyleOption, SourceInfo } from './types'
+import type { AskResponse, ModelOption, StyleOption, SourceInfo, ClaimVerdict } from './types'
 
 const BASE = '/api'
 
@@ -10,7 +10,7 @@ export interface ChatHistoryMessage {
 export async function askQuestion(
   query: string,
   style: string,
-  source: string | null,
+  sources: string[],
   topK: number,
   history: ChatHistoryMessage[] = [],
   translate: boolean = false,
@@ -22,7 +22,7 @@ export async function askQuestion(
     body: JSON.stringify({
       query,
       style,
-      source: source || null,
+      sources: sources.length > 0 ? sources : null,
       top_k: topK,
       history,
       translate,
@@ -44,7 +44,7 @@ export interface StreamCallbacks {
 export async function askQuestionStream(
   query: string,
   style: string,
-  source: string | null,
+  sources: string[],
   topK: number,
   history: ChatHistoryMessage[],
   translate: boolean,
@@ -57,7 +57,7 @@ export async function askQuestionStream(
     body: JSON.stringify({
       query,
       style,
-      source: source || null,
+      sources: sources.length > 0 ? sources : null,
       top_k: topK,
       history,
       translate,
@@ -123,6 +123,92 @@ export async function askQuestionStream(
         currentData = ''
       } else if (line !== '') {
         // Incomplete event — put remaining lines back into buffer
+        buffer = lines.slice(i).join('\n')
+        break
+      }
+    }
+  }
+}
+
+// --- Review mode ---
+
+export interface ReviewStreamCallbacks {
+  onClaims: (claims: string[]) => void
+  onVerdict: (verdict: ClaimVerdict) => void
+  onDone: () => void
+  onError: (error: Error) => void
+}
+
+export async function reviewArticleStream(
+  article: string,
+  sources: string[],
+  callbacks: ReviewStreamCallbacks,
+  model: string | null = null,
+  topK: number = 5,
+): Promise<void> {
+  const res = await fetch(`${BASE}/review/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      article,
+      sources: sources.length > 0 ? sources : null,
+      top_k: topK,
+      model: model || undefined,
+    }),
+  })
+
+  if (!res.ok) {
+    callbacks.onError(new Error(`API error: ${res.status}`))
+    return
+  }
+
+  const reader = res.body?.getReader()
+  if (!reader) {
+    callbacks.onError(new Error('No response body'))
+    return
+  }
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+
+    const lines = buffer.split('\n')
+    buffer = ''
+
+    let currentEvent = ''
+    let currentData = ''
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+
+      if (line.startsWith('event: ')) {
+        currentEvent = line.slice(7)
+      } else if (line.startsWith('data: ')) {
+        currentData = line.slice(6)
+      } else if (line === '' && currentEvent) {
+        try {
+          switch (currentEvent) {
+            case 'claims':
+              callbacks.onClaims(JSON.parse(currentData))
+              break
+            case 'verdict':
+              callbacks.onVerdict(JSON.parse(currentData))
+              break
+            case 'done':
+              callbacks.onDone()
+              break
+          }
+        } catch {
+          // Ignore parse errors
+        }
+        currentEvent = ''
+        currentData = ''
+      } else if (line !== '') {
         buffer = lines.slice(i).join('\n')
         break
       }

@@ -27,4 +27,18 @@ export interface Message {
   role: 'user' | 'assistant'
   content: string
   sources?: SourceInfo[]
+  /** Review mode: list of claim verdicts */
+  verdicts?: ClaimVerdict[]
+  /** Review mode: list of extracted claims (shown while verifying) */
+  claims?: string[]
 }
+
+export interface ClaimVerdict {
+  index: number
+  claim: string
+  verdict: 'supported' | 'contradicted' | 'insufficient'
+  reason: string
+  sources: SourceInfo[]
+}
+
+export type AppMode = 'ask' | 'review'

@@ -81,11 +81,16 @@ class VectorStore:
         self,
         query_text: str,
         top_k: int = 10,
-        source_filter: str | None = None,
+        source_filter: list[str] | None = None,
     ) -> list[dict]:
         query_embedding = self.embedder.embed_query(query_text)
 
-        where = {"source": source_filter} if source_filter else None
+        if source_filter and len(source_filter) == 1:
+            where = {"source": source_filter[0]}
+        elif source_filter:
+            where = {"source": {"$in": source_filter}}
+        else:
+            where = None
 
         results = self.collection.query(
             query_embeddings=[query_embedding],

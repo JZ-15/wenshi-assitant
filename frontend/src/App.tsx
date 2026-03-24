@@ -4,9 +4,10 @@ import { Sidebar } from './components/Sidebar'
 import { ChatMessage } from './components/ChatMessage'
 import { ChatInput } from './components/ChatInput'
 import { SourcePanel } from './components/SourcePanel'
-import { askQuestionStream, getModels, getStyles, getSources } from './api'
+import { ReviewMessage } from './components/ReviewMessage'
+import { askQuestionStream, reviewArticleStream, getModels, getStyles, getSources } from './api'
 import type { ChatHistoryMessage } from './api'
-import type { Message, ModelOption, StyleOption, SourceInfo } from './types'
+import type { Message, ModelOption, StyleOption, SourceInfo, AppMode } from './types'
 
 const DEFAULT_MODELS: ModelOption[] = [
   { id: 'claude-sonnet-4-20250514', name: 'Sonnet 4', description: '快速，性价比高' },
@@ -26,7 +27,7 @@ const DEFAULT_SOURCES = [
   '新唐书', '旧五代史', '新五代史', '宋史', '辽史', '金史', '元史', '明史',
 ]
 
-type LoadingState = null | 'searching' | 'generating'
+type LoadingState = null | 'searching' | 'generating' | 'extracting' | 'reviewing'
 
 /** Max number of recent messages to send as history (3 rounds = 6 messages). */
 const MAX_HISTORY = 6
@@ -34,12 +35,13 @@ const MAX_HISTORY = 6
 function App() {
   const [messages, setMessages] = useState<Message[]>([])
   const [loadingState, setLoadingState] = useState<LoadingState>(null)
+  const [mode, setMode] = useState<AppMode>('ask')
   const [models, setModels] = useState<ModelOption[]>(DEFAULT_MODELS)
   const [styles, setStyles] = useState<StyleOption[]>(DEFAULT_STYLES)
   const [sources, setSources] = useState<string[]>(DEFAULT_SOURCES)
   const [selectedModel, setSelectedModel] = useState('claude-sonnet-4-20250514')
   const [selectedStyle, setSelectedStyle] = useState('default')
-  const [selectedSource, setSelectedSource] = useState<string | null>(null)
+  const [selectedSources, setSelectedSources] = useState<string[]>([])
   const [topK, setTopK] = useState(10)
   const [translate, setTranslate] = useState(false)
   const [panelSources, setPanelSources] = useState<SourceInfo[] | null>(null)
@@ -56,7 +58,15 @@ function App() {
 
   // No auto-scroll — user controls scroll position
 
-  const handleSend = async (query: string) => {
+  const handleSend = async (input: string) => {
+    if (mode === 'review') {
+      await handleReview(input)
+    } else {
+      await handleAsk(input)
+    }
+  }
+
+  const handleAsk = async (query: string) => {
     const userMessage: Message = { role: 'user', content: query }
     setMessages((prev) => [...prev, userMessage])
     setLoadingState('searching')
@@ -70,7 +80,7 @@ function App() {
       await askQuestionStream(
         query,
         selectedStyle,
-        selectedSource,
+        selectedSources,
         topK,
         history,
         translate,
@@ -135,6 +145,68 @@ function App() {
         {
           role: 'assistant',
           content: '请求失败，请检查后端 API 是否已启动（python -m history_rag serve）',
+        },
+      ])
+      setLoadingState(null)
+    }
+  }
+
+  const handleReview = async (article: string) => {
+    // Show user's article as a message
+    const userMessage: Message = { role: 'user', content: article }
+    setMessages((prev) => [...prev, userMessage])
+    setLoadingState('extracting')
+
+    try {
+      await reviewArticleStream(
+        article,
+        selectedSources,
+        {
+          onClaims: (claims) => {
+            // Create assistant message with claims (verdicts will fill in progressively)
+            setMessages((prev) => [
+              ...prev,
+              { role: 'assistant', content: '', claims, verdicts: [] },
+            ])
+            setLoadingState('reviewing')
+          },
+          onVerdict: (verdict) => {
+            setMessages((prev) => {
+              const updated = [...prev]
+              const last = updated[updated.length - 1]
+              if (last && last.role === 'assistant' && last.verdicts) {
+                updated[updated.length - 1] = {
+                  ...last,
+                  verdicts: [...last.verdicts, verdict],
+                }
+              }
+              return updated
+            })
+          },
+          onDone: () => {
+            setLoadingState(null)
+          },
+          onError: (error) => {
+            console.error('Review error:', error)
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: 'assistant',
+                content: '审稿请求失败，请检查后端 API 是否已启动',
+              },
+            ])
+            setLoadingState(null)
+          },
+        },
+        selectedModel,
+        topK,
+      )
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: '审稿请求失败，请检查后端 API 是否已启动',
         },
       ])
       setLoadingState(null)
@@ -267,21 +339,33 @@ function App() {
 
   const loading = loadingState !== null
 
+  const loadingText = (() => {
+    switch (loadingState) {
+      case 'searching': return '检索史料中…'
+      case 'generating': return '生成回答中…'
+      case 'extracting': return '提取断言中…'
+      case 'reviewing': return '逐条审核中…'
+      default: return ''
+    }
+  })()
+
   return (
     <div className="h-screen flex bg-[#0f0f0f]">
       {/* Sidebar */}
       <Sidebar
+        mode={mode}
         models={models}
         styles={styles}
         sources={sources}
         selectedModel={selectedModel}
         selectedStyle={selectedStyle}
-        selectedSource={selectedSource}
+        selectedSources={selectedSources}
         topK={topK}
         translate={translate}
+        onModeChange={setMode}
         onModelChange={setSelectedModel}
         onStyleChange={setSelectedStyle}
-        onSourceChange={setSelectedSource}
+        onSourcesChange={setSelectedSources}
         onTopKChange={setTopK}
         onTranslateChange={setTranslate}
       />
@@ -291,7 +375,9 @@ function App() {
         {/* Header */}
         <header className="border-b border-[#2a2a2a] bg-[#141414] px-6 py-3 flex items-center gap-3 shrink-0">
           <h1 className="text-lg font-semibold text-amber-100">文史写稿助手</h1>
-          <span className="text-xs text-gray-600">基于二十四史 RAG</span>
+          <span className="text-xs text-gray-600">
+            {mode === 'review' ? '审稿模式 — 基于史料核查' : '基于二十四史 RAG'}
+          </span>
           <div className="ml-auto flex items-center gap-2">
             {messages.length > 0 && (
               <>
@@ -315,7 +401,7 @@ function App() {
         {/* Messages */}
         <div ref={chatScrollRef} className="flex-1 overflow-y-auto px-4 py-6">
           <div className="max-w-4xl mx-auto flex flex-col gap-4">
-            {messages.length === 0 && (
+            {messages.length === 0 && mode === 'ask' && (
               <div className="text-center py-20">
                 <div className="text-4xl mb-4">📜</div>
                 <h2 className="text-xl text-gray-400 mb-2">文史写稿助手</h2>
@@ -341,24 +427,59 @@ function App() {
               </div>
             )}
 
-            {messages.map((msg, i) => (
-              <ChatMessage
-                key={i}
-                message={msg}
-                onViewSources={msg.sources?.length ? () => {
-                  const chatEl = chatScrollRef.current
-                  const savedScroll = chatEl?.scrollTop ?? 0
-                  setPanelSources(msg.sources!)
-                  setHighlightIndex(null)
-                  requestAnimationFrame(() => {
-                    if (chatEl) chatEl.scrollTop = savedScroll
-                  })
-                } : undefined}
-                onClickRef={msg.sources?.length ? (index: number) => scrollToSource(index, msg.sources!) : undefined}
-              />
-            ))}
+            {messages.length === 0 && mode === 'review' && (
+              <div className="text-center py-20">
+                <div className="text-4xl mb-4">🔍</div>
+                <h2 className="text-xl text-gray-400 mb-2">史料审稿</h2>
+                <p className="text-sm text-gray-600 mb-4">
+                  粘贴您的稿件，系统将基于二十四史等史料逐条核查史实断言
+                </p>
+                <p className="text-xs text-gray-600">
+                  系统会自动提取文中的史实断言，跳过主观评价和修辞
+                </p>
+              </div>
+            )}
 
-            {loading && (
+            {messages.map((msg, i) => {
+              // Review mode: render ReviewMessage for assistant messages with verdicts
+              if (msg.role === 'assistant' && msg.verdicts !== undefined) {
+                return (
+                  <ReviewMessage
+                    key={i}
+                    claims={msg.claims}
+                    verdicts={msg.verdicts}
+                    onViewSources={(verdictSources) => {
+                      const chatEl = chatScrollRef.current
+                      const savedScroll = chatEl?.scrollTop ?? 0
+                      setPanelSources(verdictSources)
+                      setHighlightIndex(null)
+                      requestAnimationFrame(() => {
+                        if (chatEl) chatEl.scrollTop = savedScroll
+                      })
+                    }}
+                  />
+                )
+              }
+
+              return (
+                <ChatMessage
+                  key={i}
+                  message={msg}
+                  onViewSources={msg.sources?.length ? () => {
+                    const chatEl = chatScrollRef.current
+                    const savedScroll = chatEl?.scrollTop ?? 0
+                    setPanelSources(msg.sources!)
+                    setHighlightIndex(null)
+                    requestAnimationFrame(() => {
+                      if (chatEl) chatEl.scrollTop = savedScroll
+                    })
+                  } : undefined}
+                  onClickRef={msg.sources?.length ? (index: number) => scrollToSource(index, msg.sources!) : undefined}
+                />
+              )
+            })}
+
+            {loading && !messages.some(m => m.verdicts !== undefined && m.verdicts.length < (m.claims?.length ?? 0)) && (
               <div className="flex justify-start">
                 <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-2xl rounded-bl-sm px-5 py-4">
                   <div className="flex items-center gap-2">
@@ -368,7 +489,7 @@ function App() {
                       <div className="w-2 h-2 bg-amber-600 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                     </div>
                     <span className="text-xs text-gray-500 ml-2">
-                      {loadingState === 'searching' ? '检索史料中…' : '生成回答中…'}
+                      {loadingText}
                     </span>
                   </div>
                 </div>
@@ -380,7 +501,7 @@ function App() {
         </div>
 
         {/* Input */}
-        <ChatInput onSend={handleSend} disabled={loading} />
+        <ChatInput onSend={handleSend} disabled={loading} mode={mode} />
       </div>
 
       {/* Source panel */}

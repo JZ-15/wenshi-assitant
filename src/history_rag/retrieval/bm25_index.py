@@ -1,5 +1,7 @@
 import logging
+import pickle
 import re
+from pathlib import Path
 
 import jieba
 from rank_bm25 import BM25Okapi
@@ -7,6 +9,9 @@ from rank_bm25 import BM25Okapi
 logger = logging.getLogger(__name__)
 
 PUNCTUATION = set('，。！？；：、""''（）《》·')
+
+# Default cache path under data/
+_DEFAULT_CACHE_PATH = Path(__file__).resolve().parent.parent.parent.parent / "data" / "bm25_cache.pkl"
 
 
 def _tokenize(text: str) -> list[str]:
@@ -28,20 +33,40 @@ def _tokenize(text: str) -> list[str]:
 class BM25Index:
     """BM25 index built from ChromaDB documents for hybrid search."""
 
-    def __init__(self, collection):
-        """Build BM25 index from a ChromaDB collection.
+    def __init__(self, collection, cache_path: str | Path | None = _DEFAULT_CACHE_PATH):
+        """Build BM25 index from a ChromaDB collection, with disk caching.
 
         Args:
             collection: A ChromaDB collection instance.
+            cache_path: Path to cache file. Set to None to disable caching.
         """
-        logger.info("Building BM25 index from ChromaDB collection...")
+        total = collection.count()
+        cache_path = Path(cache_path) if cache_path else None
 
-        # Load all documents in batches to avoid ChromaDB SQL variable limits
+        # Try loading from cache
+        if cache_path and cache_path.exists():
+            try:
+                with open(cache_path, "rb") as f:
+                    cached = pickle.load(f)
+                if cached.get("total") == total:
+                    self._ids = cached["ids"]
+                    self._documents = cached["documents"]
+                    self._metadatas = cached["metadatas"]
+                    self._index = cached["index"]
+                    logger.info("BM25 index loaded from cache (%d documents)", len(self._ids))
+                    return
+                else:
+                    logger.info("Cache stale (cached %d, current %d) — rebuilding", cached.get("total"), total)
+            except Exception as e:
+                logger.warning("Failed to load BM25 cache: %s — rebuilding", e)
+
+        # Build from scratch
+        logger.info("Building BM25 index from ChromaDB collection (%d documents)...", total)
+
         self._ids: list[str] = []
         self._documents: list[str] = []
         self._metadatas: list[dict] = []
 
-        total = collection.count()
         batch_size = 5000
         for offset in range(0, total, batch_size):
             batch = collection.get(
@@ -59,7 +84,6 @@ class BM25Index:
             return
 
         # Tokenize documents with source metadata prefix for better keyword matching
-        # e.g. searching "三国志" or "武帝纪" will now hit relevant chunks
         tokenized = []
         for doc, meta in zip(self._documents, self._metadatas):
             prefix = f"{meta.get('citation', '')} {meta.get('chapter', '')} "
@@ -67,8 +91,25 @@ class BM25Index:
         self._index = BM25Okapi(tokenized)
         logger.info("BM25 index built with %d documents", len(self._ids))
 
+        # Save to cache
+        if cache_path:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(cache_path, "wb") as f:
+                    pickle.dump({
+                        "total": total,
+                        "ids": self._ids,
+                        "documents": self._documents,
+                        "metadatas": self._metadatas,
+                        "index": self._index,
+                    }, f, protocol=pickle.HIGHEST_PROTOCOL)
+                size_mb = cache_path.stat().st_size / (1024 * 1024)
+                logger.info("BM25 cache saved to %s (%.1f MB)", cache_path, size_mb)
+            except Exception as e:
+                logger.warning("Failed to save BM25 cache: %s", e)
+
     def search(
-        self, query: str, top_k: int = 10, source_filter: str | None = None
+        self, query: str, top_k: int = 10, source_filter: list[str] | None = None
     ) -> list[dict]:
         """Search the BM25 index.
 
@@ -89,7 +130,7 @@ class BM25Index:
         for i, score in enumerate(scores):
             if score <= 0:
                 continue
-            if source_filter and self._metadatas[i].get("source") != source_filter:
+            if source_filter and self._metadatas[i].get("source") not in source_filter:
                 continue
             candidates.append((i, score))
 

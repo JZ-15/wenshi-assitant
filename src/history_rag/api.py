@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -61,6 +62,8 @@ app.add_middleware(
 class AskRequest(BaseModel):
     query: str
     style: str = "default"
+    sources: list[str] | None = None
+    # Backward compatibility: accept old single-source field
     source: str | None = None
     top_k: int = 10
     history: list[dict] = []
@@ -79,6 +82,13 @@ class SourceInfo(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     sources: list[SourceInfo]
+
+
+class ReviewRequest(BaseModel):
+    article: str
+    sources: list[str] | None = None
+    top_k: int = 5
+    model: str | None = None
 
 
 class StatsResponse(BaseModel):
@@ -102,8 +112,36 @@ ALL_SOURCES = [
     "史记", "汉书", "后汉书", "三国志", "晋书", "宋书", "南齐书", "梁书",
     "陈书", "魏书", "北齐书", "周书", "隋书", "南史", "北史", "旧唐书",
     "新唐书", "旧五代史", "新五代史", "宋史", "辽史", "金史", "元史", "明史",
-    "辜鸿铭资料",
+    "资治通鉴", "辜鸿铭资料",
 ]
+
+
+def _parse_verdict_json(raw: str) -> dict:
+    """Robustly parse LLM verdict JSON, handling malformed responses."""
+    # Try direct parse of the first JSON object found
+    match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    # Fallback: extract verdict and reason with regex
+    verdict = "insufficient"
+    for v in ("supported", "contradicted", "insufficient"):
+        if v in raw.lower():
+            verdict = v
+            break
+
+    # Strip the JSON wrapper to get the reason text
+    reason = raw.strip()
+    # Remove JSON-like prefix/suffix
+    reason = re.sub(r'^\{.*?"reason"\s*:\s*"?', '', reason)
+    reason = re.sub(r'"?\s*\}$', '', reason)
+    if not reason:
+        reason = raw.strip()
+
+    return {"verdict": verdict, "reason": reason}
 
 
 def _get_gen_llm(model: str | None):
@@ -143,7 +181,13 @@ def _retrieve_and_filter(llm, retriever, req: AskRequest):
     from history_rag.generation.query_rewriter import rewrite_query_with_context
 
     queries = rewrite_query_with_context(llm, req.history, req.query)
-    source_filter = req.source if req.source and req.source != "全部" else None
+    # Support both new multi-select `sources` and old single `source` field
+    if req.sources:
+        source_filter = req.sources
+    elif req.source and req.source != "全部":
+        source_filter = [req.source]
+    else:
+        source_filter = None
     results, _ = retriever.retrieve(queries, top_k=req.top_k, source_filter=source_filter)
 
     if not results:
@@ -262,6 +306,102 @@ def ask_stream(req: AskRequest):
             highlights_data = [[] for _ in results]
 
         yield f"event: highlights\ndata: {json.dumps(highlights_data, ensure_ascii=False)}\n\n"
+        yield "event: done\ndata: \n\n"
+
+    return StreamingResponse(
+        generate_events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/review/stream")
+def review_stream(req: ReviewRequest):
+    """SSE streaming endpoint for article review / fact-checking.
+
+    Events:
+      - event: claims   → JSON array of extracted claim strings
+      - event: verdict  → JSON object {index, claim, verdict, reason, sources[]}
+      - event: done     → empty
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from history_rag.generation.claim_extractor import extract_claims
+    from history_rag.generation.relevance_filter import filter_relevant
+    from history_rag.generation.prompts import _load_template
+
+    retriever = _components["retriever"]
+    llm = _components["llm"]
+    llm_gen = _get_gen_llm(req.model)
+    source_filter = req.sources if req.sources else None
+
+    review_system = _load_template("system_review.txt")
+
+    def _verify_one(i: int, claim: str) -> dict:
+        """Verify a single claim. Runs in a worker thread."""
+        try:
+            # Use claim directly as query — no rewriting needed for specific factual assertions
+            results, _ = retriever.retrieve(claim, top_k=req.top_k, source_filter=source_filter)
+
+            if results:
+                results = filter_relevant(llm, claim, results)
+                results = _sandwich_reorder(results)
+
+            context_parts = []
+            for j, r in enumerate(results, 1):
+                citation = r["metadata"]["citation"]
+                chapter = r["metadata"]["chapter"]
+                text = r["text"]
+                context_parts.append(f"[{j}] {citation}（{chapter}）:\n{text}")
+            context = "\n\n".join(context_parts)
+
+            if results:
+                user_prompt = f"断言：{claim}\n\n以下是检索到的史料证据：\n\n{context}"
+                raw = llm_gen.generate(review_system, user_prompt, max_tokens=1024)
+                verdict_data = _parse_verdict_json(raw)
+            else:
+                verdict_data = {"verdict": "insufficient", "reason": "未检索到相关史料记载。"}
+
+            sources_data = [s.model_dump() for s in _build_sources(results)]
+            return {
+                "index": i,
+                "claim": claim,
+                "verdict": verdict_data.get("verdict", "insufficient"),
+                "reason": verdict_data.get("reason", ""),
+                "sources": sources_data,
+            }
+        except Exception as e:
+            logger.warning("Verdict failed for claim %d: %s", i, e)
+            return {
+                "index": i,
+                "claim": claim,
+                "verdict": "insufficient",
+                "reason": f"审核过程出错：{e}",
+                "sources": [],
+            }
+
+    def generate_events():
+        # Step 1: Extract claims
+        claims = extract_claims(llm, req.article)
+        yield f"event: claims\ndata: {json.dumps(claims, ensure_ascii=False)}\n\n"
+
+        if not claims:
+            yield "event: done\ndata: \n\n"
+            return
+
+        # Step 2: Verify claims in parallel (4 workers to balance speed vs rate limits)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {
+                pool.submit(_verify_one, i, claim): i
+                for i, claim in enumerate(claims)
+            }
+            for future in as_completed(futures):
+                verdict_event = future.result()
+                yield f"event: verdict\ndata: {json.dumps(verdict_event, ensure_ascii=False)}\n\n"
+
         yield "event: done\ndata: \n\n"
 
     return StreamingResponse(

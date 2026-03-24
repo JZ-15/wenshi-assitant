@@ -12,14 +12,14 @@ class Retriever:
         self,
         query: str | list[str],
         top_k: int = 10,
-        source_filter: str | None = None,
+        source_filter: list[str] | None = None,
     ) -> tuple[list[dict], str]:
         """Retrieve relevant documents and format as context string.
 
         Args:
             query: Single query string or list of rewritten queries.
             top_k: Number of results per query.
-            source_filter: Optional source book filter.
+            source_filter: Optional list of source books to filter by.
 
         Returns:
             (raw_results, formatted_context)
